@@ -39,6 +39,13 @@ class Tool[ArgsT: BaseModel](ABC):
             prop.pop("title", None)
         return ToolSpec(name=self.name, description=self.description, parameters=schema)
 
+    def precheck(self, args: ArgsT) -> None:  # noqa: B027 - optional hook, intentionally empty
+        """Reject obviously bad input before the user is asked to approve it.
+
+        Raise ToolError to refuse. Runs before describe() and the approval gate, so a human is
+        never prompted to approve an action that would be rejected anyway.
+        """
+
     @abstractmethod
     def describe(self, args: ArgsT) -> str:
         """One-line, human-readable summary of what this call will do (shown for approval)."""
@@ -82,6 +89,7 @@ class ToolRegistry:
             return ToolResult(f"Invalid arguments for {call.name}: {_format_validation(exc)}", True)
 
         try:
+            tool.precheck(args)
             summary = tool.describe(args)
             if tool.risk is not Risk.READ and not self._approver.approve(
                 ApprovalRequest(tool=tool.name, risk=tool.risk, summary=summary)

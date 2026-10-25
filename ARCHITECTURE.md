@@ -17,6 +17,7 @@
 | `llm/ollama_client.py` | Ollama adapter; all wire-format and error translation lives here |
 | `tools/base.py` | `Tool` ABC, `ToolRegistry` (validation, approval, truncation, error containment) |
 | `tools/filesystem.py`, `tools/shell.py` | Concrete tools |
+| `tools/validate.py` | Heuristics that catch mangled files (double-escaped newlines, bad syntax) |
 | `safety/paths.py` | `Workspace`: path confinement |
 | `safety/policy.py` | `CommandPolicy` allowlist, `ModeApprover` approval modes |
 | `context.py` | History budgeting (elide oldest tool output first) |
@@ -38,8 +39,11 @@ never on Ollama, Rich or Typer.
 
 ### `ToolRegistry.execute` pipeline
 
-unknown tool? -> validate args with the tool's pydantic model -> `describe()` the action ->
-approval gate (skipped for read-only tools) -> run -> truncate output.
+unknown tool? -> validate args with the tool's pydantic model -> `precheck()` -> `describe()` the
+action -> approval gate (skipped for read-only tools) -> run -> truncate output.
+
+`precheck()` is an optional per-tool hook that rejects obviously bad input before a human is asked
+to approve it, so nobody is prompted for an action that would be refused anyway.
 
 Every expected failure becomes a `ToolResult(is_error=True)` string for the model. An unexpected
 exception is logged and also returned as text, so a buggy tool cannot crash a run.
@@ -56,6 +60,14 @@ exception is logged and also returned as text, so a buggy tool cannot crash a ru
 - **Observer for output.** The same loop drives the terminal, the JSONL trace, and the tests.
 - **No shell.** Commands are parsed with `shlex` and run as an argv list. Shell metacharacters are
   refused, which removes injection and chaining as a class.
+- **Guards for mangled files** (`tools/validate.py`). Small models sometimes double-escape newlines
+  in tool arguments, so a multi-line file arrives as one line. `write_file` refuses content with no
+  real line break and two or more literal `\n` sequences, and tells the model how to resend. A
+  genuine single-line file passes if it ends with one real newline. After any write or edit, TOML,
+  JSON and Python files are parsed and a failure is appended as a `WARNING` rather than an error,
+  because intermediate edits can be legitimately invalid. Write results also report a line count.
+  These are heuristics that make failures visible to the model; they do not make a weak model
+  reliable.
 
 ## Threat model
 

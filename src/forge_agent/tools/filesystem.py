@@ -11,8 +11,22 @@ from pydantic import BaseModel, Field
 from forge_agent.errors import ToolError
 from forge_agent.safety import Risk, Workspace
 from forge_agent.tools.base import Tool
+from forge_agent.tools.validate import check_syntax, double_escape_message, looks_double_escaped
 
-_SKIP_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__", ".forge", ".mypy_cache"})
+_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",  # the other common virtualenv name; listing it floods the model's context
+        "node_modules",
+        "__pycache__",
+        ".forge",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".tox",
+    }
+)
 _MAX_LIST_ENTRIES = 300
 
 
@@ -118,6 +132,10 @@ class WriteFile(Tool[_WriteArgs]):
         self._ws = workspace
         self._max_bytes = max_bytes
 
+    def precheck(self, args: _WriteArgs) -> None:
+        if looks_double_escaped(args.content):
+            raise ToolError(double_escape_message())
+
     def describe(self, args: _WriteArgs) -> str:
         verb = "overwrite" if self._ws.resolve(args.path, for_write=True).exists() else "create"
         return f"{verb} {args.path} ({len(args.content.encode())} bytes)"
@@ -130,7 +148,12 @@ class WriteFile(Tool[_WriteArgs]):
         path = self._ws.resolve(args.path, for_write=True)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-        return f"wrote {len(data)} bytes to {self._ws.display(path)}"
+        # Reporting the line count gives the model a cheap signal when a multi-line file arrived
+        # mangled onto a single line.
+        lines = len(args.content.splitlines())
+        noun = "line" if lines == 1 else "lines"
+        summary = f"wrote {len(data)} bytes ({lines} {noun}) to {self._ws.display(path)}"
+        return _with_syntax_warning(summary, path, args.content)
 
 
 class _EditArgs(BaseModel):
@@ -173,4 +196,12 @@ class EditFile(Tool[_EditArgs]):
             msg = "resulting file would exceed the size limit"
             raise ToolError(msg)
         path.write_text(updated, encoding="utf-8")
-        return f"edited {self._ws.display(path)}"
+        return _with_syntax_warning(f"edited {self._ws.display(path)}", path, updated)
+
+
+def _with_syntax_warning(message: str, path: Path, text: str) -> str:
+    """Append an advisory when the file we just wrote does not parse, so the model can fix it."""
+    problem = check_syntax(path, text)
+    if problem is None:
+        return message
+    return f"{message}\nWARNING: the file was written but has a problem: {problem}. Fix it."

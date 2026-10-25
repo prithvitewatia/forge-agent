@@ -7,7 +7,7 @@ from pathlib import Path
 from forge_agent.errors import SafetyError
 
 # Directories the agent may never write into, even inside the workspace.
-_PROTECTED_PARTS = frozenset({".git", ".forge", ".venv"})
+_PROTECTED_PARTS = frozenset({".git", ".forge", ".venv", "venv"})
 
 
 class Workspace:
