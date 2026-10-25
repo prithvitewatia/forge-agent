@@ -14,31 +14,171 @@ layer, loop guards, context budgeting, and replayable run traces.
 
 ## Requirements
 
-- Python 3.12+ and [uv](https://docs.astral.sh/uv/)
-- [Ollama](https://ollama.com) running locally, with a tool-capable model pulled:
-  `ollama pull qwen3:8b`
+| Requirement | Notes |
+| --- | --- |
+| Python 3.12+ | `uv` can download and manage this for you, so a system install is optional |
+| [uv](https://docs.astral.sh/uv/) | Package and environment manager |
+| [Ollama](https://ollama.com) | Local model server |
+| A tool-capable model | Default is `qwen3:8b` (about 5 GB). Needs the `tools` capability |
+| RAM | 16 GB recommended for an 8B model at the default 16k context |
 
-## Quick start
+## Installation
+
+### 1. Install the prerequisites
 
 ```bash
-uv sync
-uv run forge doctor                  # verifies server, model, and tool-calling support
-uv run forge run "Add a function is_prime(n) to math_utils.py with tests" --workspace ./my-project
+# uv (macOS / Linux)
+curl -LsSf https://astral.sh/uv/install.sh | sh      # or: brew install uv
+
+# Ollama: download from https://ollama.com/download, or on macOS:
+brew install ollama
 ```
 
-By default every file write and command asks for your approval. Useful flags:
+### 2. Pull a model
 
-| Flag | Meaning |
+```bash
+ollama pull qwen3:8b
+```
+
+### 3. Get Forge and install its dependencies
+
+```bash
+git clone https://github.com/<your-username>/forge-agent.git
+cd forge-agent
+uv sync
+```
+
+`uv sync` creates a `.venv`, installs Python 3.12 if it is not already available, and installs
+Forge with its dependencies. Nothing is installed system-wide.
+
+### 4. Verify the setup
+
+Make sure the Ollama server is running (the desktop app starts it automatically; otherwise run
+`ollama serve` in a separate terminal), then:
+
+```bash
+uv run forge doctor
+```
+
+You should see `OK` for the server, the model, and tool calling. If anything shows `FAIL`, see
+[Troubleshooting](#troubleshooting).
+
+### Optional: install `forge` as a global command
+
+To run `forge` from any project directory without `uv run`:
+
+```bash
+uv tool install .
+forge --version
+```
+
+Re-run `uv tool install . --force` after pulling new changes to update it.
+
+## Usage
+
+### Quick start
+
+Create a scratch project and give the agent a task:
+
+```bash
+mkdir -p /tmp/forge-demo
+uv run forge run "Create hello.py that prints hello, then run it to check it works" \
+  --workspace /tmp/forge-demo
+```
+
+By default, every file write and command stops and asks for your approval. Review each prompt and
+answer `y` or `n`.
+
+> **Pick the workspace deliberately.** The agent can read and modify files in the workspace, which
+> defaults to your current directory. When running from inside the `forge-agent` repository,
+> always pass `--workspace` or the agent will be working on Forge's own source. If you installed
+> the global command, simply `cd` into the project you want to work on first.
+
+### Example tasks
+
+```bash
+# Explore without changing anything (read-only)
+forge run "Explain how the tests in this project are organised" --approval deny
+
+# Fix a bug and verify it
+forge run "Fix the failing test in tests/test_math.py and run pytest to confirm"
+
+# Add a feature, auto-approving edits (allowlisted commands only; use on a git-tracked project)
+forge run "Add input validation to parse_config() and add tests" --approval auto
+```
+
+### Approval modes
+
+| Mode | Behaviour |
 | --- | --- |
-| `--approval ask\|auto\|deny` | `ask` prompts per action (default); `auto` approves writes and allowlisted commands; `deny` is read-only |
-| `--model TAG` | Any Ollama model that supports tools |
+| `ask` (default) | Prompts before every file write and command |
+| `auto` | Approves writes inside the workspace and allowlisted commands without asking |
+| `deny` | Read-only: any write or command is refused |
+
+Reading and listing files never needs approval. Commands outside the allowlist are always refused,
+in every mode.
+
+### Command-line options
+
+| Option | Meaning |
+| --- | --- |
+| `--workspace PATH` | Project directory the agent may work in (default: current directory) |
+| `--model TAG` | Any Ollama model that supports tools (default `qwen3:8b`) |
+| `--host URL` | Ollama server URL (default `http://localhost:11434`) |
+| `--approval ask\|auto\|deny` | See [Approval modes](#approval-modes) |
 | `--max-steps N` | Hard cap on agent iterations (default 25) |
 | `--think / --no-think` | Toggle model thinking mode, if the model supports it |
 | `--show-thinking` | Print the model's reasoning |
 | `--no-trace` | Skip writing the JSONL trace |
+| `--log-level LEVEL` | `DEBUG`, `INFO`, `WARNING` (default), and so on |
 
-Every setting can also be given as an environment variable or `.env` entry with a `FORGE_` prefix
-(for example `FORGE_MODEL`, `FORGE_NUM_CTX`, `FORGE_MAX_STEPS`). See `src/forge_agent/config.py`.
+Run `forge run --help` for the full list. You can also invoke the module directly with
+`python -m forge_agent`.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Task completed |
+| `1` | The run did not complete (step limit, loop detected, or model error) |
+| `2` | Invalid configuration, such as a workspace that does not exist |
+
+### Configuration
+
+Every setting can also be provided as an environment variable or in a `.env` file in the directory
+you run from, using a `FORGE_` prefix. Command-line options take priority over these.
+
+```bash
+# .env
+FORGE_MODEL=qwen3:8b
+FORGE_NUM_CTX=16384        # context window; raise carefully, it costs RAM
+FORGE_MAX_STEPS=30
+FORGE_APPROVAL_MODE=ask
+FORGE_THINK=true
+```
+
+All available settings, with their defaults and validation rules, are in
+`src/forge_agent/config.py`.
+
+### Run traces
+
+Each run writes a JSONL trace to `<workspace>/.forge/runs/run-<timestamp>.jsonl`, recording the
+assistant's messages, every tool call, and every result. It is the first thing to look at when a
+run goes wrong. Add `.forge/` to the project's `.gitignore`.
+
+## Troubleshooting
+
+| Symptom | Likely cause and fix |
+| --- | --- |
+| `Cannot reach Ollama at http://localhost:11434` | The server is not running. Open the Ollama app or run `ollama serve` |
+| `Model 'X' is not available locally` | Run `ollama pull X`, or pick an installed model with `--model` (see `ollama list`) |
+| `does not report tool support` | The model cannot call tools. Choose one that lists `tools` under `ollama show <model>` |
+| `think is enabled but ... lacks 'thinking'` | Drop `--think`, or use a model that supports thinking |
+| `Stopping: 'X' was called 3 times in a row` | The model got stuck repeating itself. Rephrase the task, make it smaller, or try a larger model |
+| `Stopped after N steps without finishing` | Task too large for the step budget. Split it up, or raise `--max-steps` |
+| A command is refused as "not allowed" | By design. Only allowlisted commands run, with no pipes, redirects, `&&`, or inline `python -c` |
+| Very slow responses or memory pressure | Lower `FORGE_NUM_CTX` (for example 8192), close other apps, or use a smaller model |
+| `python` not found inside the agent | Commands run with a minimal environment. Make sure `python` is on your `PATH`, or have the agent use `uv run` |
 
 ## How it works
 
